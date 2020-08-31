@@ -11,6 +11,8 @@ from matplotlib.colors import ListedColormap
 from astropy.visualization import astropy_mpl_style
 from astropy.convolution import Tophat2DKernel
 from astropy.modeling.functional_models import Ellipse2D
+from astropy.wcs.utils import skycoord_to_pixel
+from astropy.coordinates import SkyCoord
 from math import floor
 plt.style.use(astropy_mpl_style)
 
@@ -314,43 +316,90 @@ def find_consec(arr):
     return np.unique(consec_arr)
 
 
-def image_stack(files, nchans, rwindow, profonly = False, imonly = False, sigma=None):
-    
-    nfiles = len(files)
+def image_stack(files, nchans, rwindow, stackcenter=None, profonly=False, imonly=False, sigma=None):
+
     chanrange = nchans // 2
-    
+
     # define a circular window about the center of the file to integrate over to get the spectral profile
+    # currently, the program is cutting a big 160x160 square region out of the file and then clipping out
+    # a circular window with radius rwindow. nothing's implemented to deal with cases where this goes out of frame
     window = Ellipse2D(1, 80, 80, rwindow, rwindow, 0)
     # to get an actual array, need to pass it a meshgrid of x and y coordinates
     datx = np.arange(160)
     x, y = np.meshgrid(datx, datx)
-    
-    # load all image data into a single master image cube, placing channels the same distance from the center 
-    # next to each other
-    mcube = []
+
+    mcube =[]
     mprof = []
-    
+
+    # read each relevant frame of the cubes into a single master array to average down
     for i, file in enumerate(files):
+        # load in the data and WCS system from the fits file
         hdu = fits.open(file)[0]
         data = hdu.data
         datawcs = wcs.WCS(hdu.header).sub(['celestial'])
         # remove the empty stokes axis and keep only the channels and pixels around the center
-        data = data[0,:,:,:]
-        
-        centchan = data.shape[0] // 2
-        minc, maxc = centchan-chanrange, centchan+chanrange
-        
-        centpix = data.shape[1] // 2
-        minp, maxp = centpix - 80, centpix + 80
-        
-        data = data[minc:maxc, minp:maxp, minp:maxp]
+        data = data[0, :, :, :]
 
-        
-        # map nans to zero
+        imchans = data.shape[0]
+        impix = data.shape[1]
+
+        centchan = imchans // 2
+        minc, maxc = centchan - chanrange, centchan + chanrange
+
+        if not stackcenter:
+            centpix = impix // 2
+
+            # if the image is small enough that this number +/- 80 will extend past the edges of the frame,
+            # pad the edges with -99 (so they'll show up clearly in the final stacked image)
+            if centpix < 80:
+                diff = 80 - centpix
+                npad = diff + 5
+                data = np.pad(data, ((0, 0), (npad, npad), (npad, npad)), 'constant', constant_values=-99)
+                centpix += npad
+
+            minp, maxp = centpix - 80, centpix + 80
+
+            data = data[minc:maxc, minp:maxp, minp:maxp]
+
+        else:
+            centx, centy = stackcenter[0], stackcenter[1]
+
+            # here, pad selectively - if the x axis is going to over extend, fix it, and then check the y axis
+            # individually
+            if centx < 80:
+                diff = 80 - centx
+                npad = diff + 5
+                data = np.pad(data, ((0, 0), (npad, 0), (0, 0)), 'constant', constant_values=-99)
+                centx = centx + npad
+
+            elif centx > (impix - 80):
+                diff = centx - (impix - 80)
+                npad = diff + 5
+                data = np.pad(data, ((0, 0), (0, npad), (0, 0)), 'constant', constant_values=-99)
+
+            if centy < 80:
+                diff = 80 - centy
+                npad = diff + 5
+                data = np.pad(data, ((0, 0), (0, 0), (npad, 0)), 'constant', constant_values=-99)
+                centy = centy + npad
+
+            elif centy > (impix - 80):
+                diff = centy - (impix - 80)
+                npad = diff + 5
+                data = np.pad(data, ((0, 0), (0, 0), (0, npad)), 'constant', constant_values=-99)
+
+            minx, maxx = centx - 80, centx + 80
+            miny, maxy = centy - 80, centy + 80
+
+            centpix = centx
+
+            data = data[minc:maxc, minx:maxx, miny:maxy]
+
+        # map NaNs to zero
         data[np.where(np.isnan(data))] = 0.
-        
-        # multiply data by window to get only the desired area around the center
-        data = data * window(x,y)
+
+        # multiply the data by window to clip out only the desired area around the center
+        data = data * window(x, y)
         
         # change rwindow into arcseconds according to the specific wcs of each image to divide
         # by the area of the window when making the spectral profile
@@ -369,10 +418,11 @@ def image_stack(files, nchans, rwindow, profonly = False, imonly = False, sigma=
         
         # for each cube, get an individual spectral profile of the data in the window by summing
         # over both spatial axes
-        prof = np.sum(data, axis=(1,2)) / areg
+        prof = np.sum(data, axis=(1, 2)) / areg
+
         mprof.append(prof)
         
-        # append onto mcube - this is mastercube but out of order
+        # append onto mcube
         if i == 0:
             mcube = data
         else: 
@@ -410,11 +460,13 @@ def image_stack(files, nchans, rwindow, profonly = False, imonly = False, sigma=
     elif profonly == True:
         
         fig,axs = plt.subplots(1, figsize=(9,6))
-        
-        axs.plot(np.arange(-chanrange, chanrange), avgprof, lw=1, label='Raw')
+
+        # plot the intensity data to make sure the fit worked
+        axs.bar(np.arange(-chanrange, chanrange), avgprof, width=1)
         
         if sigma is not None:
-            axs.plot(np.arange(-chanrange, chanrange), avgprofsm, lw=3, label='Smoothed (std = {})'.format(sigma))
+            axs.plot(np.arange(-chanrange, chanrange), avgprofsm, lw=3, label='Smoothed (std = {})'.format(sigma),
+                     color='orange', zorder=10)
             axs.legend()
         axs.axhline(0, color='k')
         axs.set_ylabel('Intensity (Jy/Beam)')
@@ -435,6 +487,247 @@ def image_stack(files, nchans, rwindow, profonly = False, imonly = False, sigma=
 
 
         ''' plot second'''
+        axs[1].bar(np.arange(-chanrange, chanrange), avgprof, width=1)
+        if sigma is not None:
+            axs[1].plot(np.arange(-chanrange, chanrange), avgprofsm, lw=3, label='Smoothed (std = {})'.format(sigma),
+                        color='orange', zorder=10)
+            axs[1].legend()
+        axs[1].axhline(0, color='k')
+        axs[1].set_ylabel('Intensity (Jy/Beam)')
+        axs[1].set_xlabel('Distance from central channel')
+
+    return avg, avgprof
+
+
+def get_source_CRTF(cubefile, optfile, nstds=0.5, npix=5, r = 4., optext=(1, 200), v=False):
+    # first figure out the coordinates covered by the CO pointing
+    cubehdul = fits.open(cubefile)[0]
+    cubewcs = wcs.WCS(cubehdul.header).sub(['celestial'])
+    cubehdr = cubehdul.header
+    RAdown = (cubehdr['CRVAL1'] - cubehdr['CRPIX1'] * cubehdr['CDELT1']) * u.deg
+    RAup = (cubehdr['CRVAL1'] + cubehdr['CRPIX1'] * cubehdr['CDELT1']) * u.deg
+    DECdown = (cubehdr['CRVAL2'] - cubehdr['CRPIX2'] * cubehdr['CDELT2']) * u.deg
+    DECup = (cubehdr['CRVAL2'] + cubehdr['CRPIX2'] * cubehdr['CDELT2']) * u.deg
+
+    # open the optical file
+    opthdul = fits.open(optfile)[0]
+    optwcs = wcs.WCS(opthdul.header)
+    optdata = opthdul.data
+
+    # use the photutils functions to find sources anywhere in the optical file
+    # sources will be called a source if they contain at least npix pixels touching that have values above the
+    # threshold level
+    threshold = np.nanstd(optdata) * nstds + np.nanmean(optdata)
+
+    # source is a photutils segmentation image, cat is a list of photutils source objects that have attributes
+    # corresponding to their various properties
+    sources = detect_sources(optdata, threshold, npix, connectivity=4)
+    cat = source_properties(optdata, sources, wcs=optwcs)
+
+    # define elliptical apertures covering the sources with the correct angle and eccentricity
+    # r is a size parameter that's adjustable
+    apertures = []
+    for obj in cat:
+        position = np.transpose((obj.xcentroid.value, obj.ycentroid.value))
+        a = obj.semimajor_axis_sigma.value * r
+        b = obj.semiminor_axis_sigma.value * r
+        theta = obj.orientation.to(u.rad).value
+        apertures.append(EllipticalAperture(position, a, b, theta=theta))
+
+    # plot the optical image with sources overlaid to make sure they line up and there aren't too many/too few detected
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection=cubewcs)
+    ax.pcolormesh(optdata, vmin=optext[0], vmax=optext[1], cmap='gray')
+
+    for aperture in apertures:
+        aperture.plot(axes=ax, color='orange', lw=1.5, zorder=20)
+
+    # open a file to store the region information
+    fname = 'optregions.crtf'
+    f = open(fname, 'w')
+    f.write('#CRTF \n')
+
+    pixtodeg = opthdul.header['CD1_1'] / cubehdul.header['CDELT1']
+
+    factor = 4
+
+    for obj in cat:
+        ra = obj.sky_centroid.icrs.ra.deg
+        dec = obj.sky_centroid.icrs.dec.deg
+        if ra < RAup.value or ra > RAdown.value:
+            continue
+        elif dec < DECdown.value or dec > DECup.value:
+            continue
+
+        if v:
+            print("passed: ra {} dec {}".format(ra, dec))
+
+        xval, yval = skycoord_to_pixel(SkyCoord(ra * u.deg, dec * u.deg), wcs=cubewcs)
+
+        if v:
+            print(xval, yval)
+
+        a = obj.semimajor_axis_sigma.value * factor
+        b = obj.semiminor_axis_sigma.value * factor
+        f.write('ellipse[[' + str(xval) + 'pix, ' + str(yval) + 'pix], [' + str(a) + 'pix, ' + str(b) + 'pix], ' +
+                str(obj.orientation.value) + 'deg], coord=ICRS \n')
+
+    f.close()
+
+    return
+
+
+def opt_image_stack(files, optfiles, nchans, rwindow, profonly=False, imonly=False, sigma=None,
+                    noptstds=0.25):
+    ''' Function to find all the sources in an optical image that fall into the FoV of a pointing, and
+        to stack a circular window with radius rwindow around each of their centroids to see if theres
+        faint flux at any of the locations.
+
+        INPUTS: files: image cube files
+                optfiles: optical files (MUST BE IN THE SAME ORDER AS THE FILES)
+    '''
+
+    nfiles = len(files)
+    chanrange = nchans // 2
+
+    # define a circular window about the center of the file to integrate over to get the spectral profile
+    window = Ellipse2D(1, 80, 80, rwindow, rwindow, 0)
+    # to get an actual array, need to pass it a meshgrid of x and y coordinates
+    datx = np.arange(160)
+    x, y = np.meshgrid(datx, datx)
+
+    # load all image data into a single master image cube, placing channels the same distance from the center
+    # next to each other
+    mcube = []
+    mprof = []
+
+    for i, file in enumerate(files):
+        hdu = fits.open(file)[0]
+        data = hdu.data
+        datawcs = wcs.WCS(hdu.header).sub(['celestial'])
+        # remove the empty stokes axis and keep only the channels and pixels around the center
+        data = data[0, :, :, :]
+        # map nans to zero
+        data[np.where(np.isnan(data))] = 0.
+
+        # find the source centroids of the related optical file (in skycoords)
+        optcoords, sources, optwcs = ss.find_optical_centroids(optfiles[i], noptstds, 10)  # ****
+
+        # change the centroid values to native image cube pixels
+        optcoords = optcoords.to_pixel(datawcs)
+
+        # the channel indices apply for all sourcse in the file
+        centchan = data.shape[0] // 2
+        minc, maxc = centchan - chanrange, centchan + chanrange
+
+        data = data[minc:maxc, :, :]
+
+        # slap the whole data array into a larger array of zeros, so if the sources are
+        # too close to the edge they'll just pick up extra zeros, which won't affect the statistics
+        extdata = np.zeros(data.shape + np.array([0, 160, 160]))
+        extdata[:, 80:-80, 80:-80] = data
+
+        # SOME SORT OF VERIFICATION SYSTEM?
+        # loop through the optical sources in the file and cut out a window around each
+        for j in range(len(optcoords)):
+
+            centx = optcoords[j, 0] + 80
+            centy = optcoords[j, 1] + 80
+
+            minx, maxx = centx, centx + 160
+            miny, maxy = centy, centy + 160
+
+            sdata = extdata[:, minx:maxx, miny:maxy]
+
+            # multiply data by window to get only the desired area around the center
+            sdata = sdata * window(x, y)
+
+            # change rwindow into arcseconds according to the specific wcs of each image to divide
+            # by the area of the window when making the spectral profile
+            # here need the actual pixel values of the center so subtract 80 again
+            centx -= 80
+            centy -= 80
+            skycoordx1, skycoordx2 = datawcs.pixel_to_world([[centx, centy],
+                                                             [centx + rwindow, centy + rwindow]],
+                                                            [centx, centy])
+            # semi-major and -minor axes in arcseconds
+            rega = skycoordx2.separation(skycoordx1).to(u.arcsec)[0]
+            regb = skycoordx2.separation(skycoordx1).to(u.arcsec)[1]
+
+            # area of the window region in arcseconds squared
+            areg = np.pi * rega * regb
+
+            #         # find beam area and multiply by the beam?
+            #         abeam = (np.pi*hdu.header['BMAJ']*hdu.header['BMIN'] * u.deg**2).to(u.arcsec**2).value
+
+            # for each optical source in the cube, get an individual spectral profile of the data in the window
+            # by summing over both spatial axes
+            prof = np.sum(sdata, axis=(1, 2)) / areg
+            mprof.append(prof)
+
+            # append onto mcube
+            if i == 0 and j == 1:
+                mcube = sdata
+            else:
+                mcube = np.concatenate((mcube, sdata), axis=0)
+
+            # END for coord in optcoords
+            # END for file in files
+
+    ''' for the first subplot: single large average over all relevant channels (centered around the center of each cube) '''
+
+    # average down the channel axis
+    avg = np.mean(mcube, axis=0)
+
+    ''' second subplot: spectral profile of pix in window - average down the list of files '''
+    mprof = np.array(mprof)
+
+    avgprof = np.mean(mprof, axis=0)
+
+    # add smoothing as an option
+    if sigma is not None:
+        avgprofsm = gaussian_filter1d(avgprof, sigma=sigma, truncate=5)
+
+    # also have to divide by area over which you're integrating
+
+    if imonly == True:
+        ''' plot first only'''
+        fig, axs = plt.subplots(1, figsize=(8, 6))
+
+        xmin, xmax = 80 - rwindow, 80 + rwindow
+
+        im = axs.pcolormesh(avg[xmin:xmax, xmin:xmax])
+        axs.set_aspect(aspect=1)
+        cbar = plt.colorbar(im, ax=axs)
+        cbar.ax.set_ylabel('Intensity (Jy/Beam)')
+
+
+    elif profonly == True:
+
+        fig, axs = plt.subplots(1, figsize=(9, 6))
+
+        axs.plot(np.arange(-chanrange, chanrange), avgprof, lw=1, label='Raw')
+
+        if sigma is not None:
+            axs.plot(np.arange(-chanrange, chanrange), avgprofsm, lw=3, label='Smoothed (std = {})'.format(sigma))
+            axs.legend()
+        axs.axhline(0, color='k')
+        axs.set_ylabel('Intensity (Jy/Beam)')
+        axs.set_xlabel('Distance from Central Channel')
+
+    else:
+
+        ''' plot first'''
+        fig, axs = plt.subplots(2, figsize=(8, 6))
+
+        xmin, xmax = 80 - rwindow, 80 + rwindow
+
+        im = axs[0].pcolormesh(avg[xmin:xmax, xmin:xmax])
+        axs[0].set_aspect(aspect=1)
+        cbar = plt.colorbar(im, ax=axs[0])
+        cbar.ax.set_ylabel('Intensity (Jy/Beam)')
+
+        ''' plot second'''
         axs[1].plot(np.arange(-chanrange, chanrange), avgprof, lw=1, label='Raw')
         if sigma is not None:
             axs[1].plot(np.arange(-chanrange, chanrange), avgprofsm, lw=3, label='Smoothed (std = {})'.format(sigma))
@@ -442,26 +735,6 @@ def image_stack(files, nchans, rwindow, profonly = False, imonly = False, sigma=
         axs[1].axhline(0, color='k')
         axs[1].set_ylabel('Intensity (Jy/Beam)')
         axs[1].set_xlabel('Distance from central channel')
-    
 
-
-                          
-        
     return avg, avgprof
-    
-    
-        
-        
 
-
-
-
-
-
-
-
-
-
-
-
-        
