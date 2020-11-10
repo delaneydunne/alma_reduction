@@ -445,7 +445,7 @@ def get_vel_from_txt(specfile, p0=[0.3, 67200, 50, 0], centmean=True, p02=None, 
     return specmax, rms, opt, stdmat, hzmean, uncert
 
 
-def lco_uncert(A, z, nuobs, Lco, dA, dz, dnuobs, cosmo=FlatLambdaCDM(H0=75, Om0=0.3)):
+def lco_uncert(A, z, nuobs, Lco, dA, dz, dnuobs, cosmo=FlatLambdaCDM(H0=70, Om0=0.3)):
     # ignoring uncertainty in the luminosity distance for now (should come from dz?)
 
     # Lco = 3.25e7 * A * D_L^2 / ((1+z)^3 * nuobs^2) -> calling the top part C and the bottom part B
@@ -638,12 +638,12 @@ def get_velocity_int_flux(moment_file, cube_file, cutout, p0, use_stds=True, nst
     '''
 
 
-def co_line_luminosity(vel_int_flux, nu_obs, z, cosmo=FlatLambdaCDM(H0=75, Om0=0.3)):
+def co_line_luminosity(vel_int_flux, nu_obs, z, cosmo=FlatLambdaCDM(H0=70, Om0=0.3)):
     '''equation to find the line luminosity of CO. Taken from Solomon and Vanden Bout (2005). 
        INPUTS: vel_int_flux: velocity integrated flux (Jy.km/s)
                nu_obs: The center observed frequency of the CO line (GHz)
                cosmo: an astropy.cosmology object describing the desired cosmology (needed to calculate the
-                      luminosity distance). Default is definition in Webb (2015): flat with H0=75 km/s.Mpc and
+                      luminosity distance). Default is definition in Webb (2015): flat with H0=70 km/s.Mpc and
                       Omega_dark matter = 0.7
                z: the redshift of the source
         RETURNS the CO line luminosity in solar luminosities
@@ -664,7 +664,7 @@ def mgas_uncert(dlco, r_21=0.85, alpha_CO=1):
     return alpha_CO*dlco/r_21
 
 
-def get_M_gas_txt(textfile, z, p0, p02=None, cosmo=FlatLambdaCDM(H0=75, Om0=0.3), uncertz=0.0001,
+def get_M_gas_txt(textfile, z, p0, p02=None, cosmo=FlatLambdaCDM(H0=70, Om0=0.3), uncertz=0.0001,
                   r_21=0.85, alpha_CO=1, center_mean=True, linefree=(0, 50), n_gauss=None, zvals=(90, 160),
                   centline=False, plot=True, bounds=(np.array([-np.inf, -np.inf, -np.inf, -np.inf]),
                                                      np.array([np.inf, np.inf, np.inf, np.inf]))):
@@ -707,7 +707,7 @@ def get_M_gas_txt(textfile, z, p0, p02=None, cosmo=FlatLambdaCDM(H0=75, Om0=0.3)
 
 '''
 def get_M_gas(moment_file, cube_file, z, cutout=(90, 120), p0=[0.00004, 131700, 100, 0],
-              cosmo=FlatLambdaCDM(H0=75, Om0=0.3), r_21=0.85, alpha_CO=1, use_momflux=False, center_mean=True):
+              cosmo=FlatLambdaCDM(H0=70, Om0=0.3), r_21=0.85, alpha_CO=1, use_momflux=False, center_mean=True):
     '''''' Wrapper function encompassing all of the others - passing an image to this function should return the total gas mass
         in solar masses corresponding to the CO detection in the image.
         INPUTS: moment_file: file containing the moment 0 plot of the line detection
