@@ -26,9 +26,9 @@ def get_mstar(redshift, irac, dirac, templatefile, cosmo, corr, tol=0.005):
     '''
 
     # make sure everything's an array in case you're passing values from a dataframe
-    redshift = np.array(redshift)
-    irac = np.array(irac)
-    dirac = np.array(dirac)
+    redshift = np.array(redshift, dtype=np.float64)
+    irac = np.array(irac, dtype=np.float64)
+    dirac = np.array(dirac, dtype=np.float64)
 
     # rough guess (no K-corr)
     roughmstar = (nulnu(redshift, irac, 3.6, cosmo).value)*u.Msun
@@ -55,7 +55,10 @@ def get_mstar(redshift, irac, dirac, templatefile, cosmo, corr, tol=0.005):
     kcorrection = kfluxrestframe / tempfluxrel
 
     mstar = roughmstar*kcorrection*1.65
-    dmstar = (1-10**-0.3)*mstar + (dirac/irac)*mstar
+    if np.any(np.isnan(dirac)):
+        dmstar = (1-10**-0.3)*mstar
+    else:
+        dmstar = (1-10**-0.3)*mstar + (dirac/irac)*mstar
 
     return (mstar*corr).value, (dmstar*corr).value
 
@@ -79,6 +82,8 @@ def sfr_ce_ken(redshift, mips, dmips=-999):
 
     # uncertainty (based on 0.15dex scatter from kennicutt 98)
     if np.all(dmips == -999):
+        dkensfr = kensfr*(1-10**-0.15)
+    elif np.any(np.isnan(dmips)):
         dkensfr = kensfr*(1-10**-0.15)
     else:
         dkensfr = kensfr*(1-10**-0.15) + (dmips/mips)*kensfr
@@ -121,24 +126,34 @@ def sfr_rieke(redshift, mips, cosmo, dmips=-999):
     return sfrrieke, dsfrrieke
 
 
-def get_properties(frame, templatefile, cosmo, corr):
+def get_properties(frame, templatefile, cosmo, corr, tol=0.005):
     '''
     Function to, when passed a pandas dataframe containing mips/irac/redshift info for a given
     galaxy population, append the stellar mass, (CE/Ken) SFR, and sSFR values for each galaxy
     onto the dataframe
 
     depends on the chary and elbaz python code and a bruzual and charlot template
+    assumes MIPS values are in Jy
     '''
 
     # first get the star formation rate
-    sfrvals, dsfrvals = sfr_ce_ken(frame.z, frame.mips, frame.dmips)
+    sfrvals, dsfrvals = sfr_ce_ken(frame.z, frame.mips*1e6, frame.dmips*1e6)
 
     # then the stellar mass
-    mstarvals, dmstarvals = get_mstar(frame.z, frame.irac, frame.dirac, templatefile, cosmo, corr)
+    mstarvals, dmstarvals = get_mstar(frame.z, frame.irac, frame.dirac, templatefile, cosmo, corr,
+                                      tol=tol)
 
     # then find ssfrs
     ssfrvals = sfrvals / mstarvals * 1e9
     dssfrvals = ssfrvals * np.sqrt((dsfrvals/sfrvals)**2 + (dmstarvals/mstarvals)**2)
+
+    # then gas fractions
+    fgasvals = frame.mgas / mstarvals
+    dfgasvals = fgasvals * np.sqrt((frame.dmgas/frame.mgas)**2 + (dmstarvals/mstarvals)**2)
+
+    # and star formation efficiencies
+    sfevals = sfrvals / frame.mgas * 1e9
+    dsfevals = sfevals * np.sqrt((dsfrvals/sfrvals)**2 + (frame.dmgas/frame.mgas)**2)
 
     # add everything into the dataframe as new columns
     frame['sfr'] = sfrvals
@@ -147,5 +162,9 @@ def get_properties(frame, templatefile, cosmo, corr):
     frame['dmstar'] = dmstarvals
     frame['ssfr'] = ssfrvals
     frame['dssfr'] = dssfrvals
+    frame['fgas'] = fgasvals
+    frame['dfgas'] = dfgasvals
+    frame['sfe'] = sfevals
+    frame['dsfe'] = dsfevals
 
     return frame
