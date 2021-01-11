@@ -143,7 +143,7 @@ def plot_contour_overlay(files, optmin, optmax, cutout, pixsize, step=1, inputfr
         mipsdata[(np.where(mipsdata == -np.inf))] = 0.
         mipsdata[(np.where(np.isnan(mipsdata)))] = 0.
         mipsmax = np.nanmax(mipsdata)
-        mipsstd, mipsSN, xmcent, ymcent = oop.find_SN_sigma(files[2], (0, len(mipsdata)), mips=True)
+        mipsstd, mipsSN, xmcent, ymcent = find_SN_sigma(files[2], (0, len(mipsdata)), mips=True)
         mipslevels = np.ones((max_stds - 2) // step) * mipsmax
         mipsstds = np.arange(max_stds, 2, step=-step) * mipsstd
         mipslevels = mipslevels - mipsstds
@@ -263,6 +263,154 @@ def plot_contour_overlay(files, optmin, optmax, cutout, pixsize, step=1, inputfr
     return
 
 
+
+def spw_contours(files, mom_cutout, npix, redshift, optext=(1,200), startstds=2, step=1, max_stds=50,
+                 whole_image=False, bcgcent=None):
+    # files should be organized like (optfile, spw1, spw2, spw3, spw4)
+    # open up the files and get their data and WCS
+    # all the different SPWs should have the same wcs
+    WCSlist = []
+    datalist = []
+    hdulist = []
+    for file in files:
+        hdu = fits.open(file)[0]
+        hdulist.append(hdu)
+        WCSlist.append(wcs.WCS(hdu.header).sub(['celestial']))
+        data = hdu.data
+        data[np.where(np.isnan(data))] = 0.
+        data[np.where(data == -np.inf)] = 0.
+        data[np.where(data == np.inf)] = 0.
+        if len(data) == 4:
+            data = data[0, 0, :, :]
+        datalist.append(data)
+
+
+
+    # define a figure --- only need 1 set of axes here (maybe do one with individual spws?)
+    fig = plt.figure(figsize=(7,7))
+
+    # get SN statistics for each spw
+    momstdlist = []
+    momSNlist = []
+    levelslist = []
+    for file in files[1:]:
+        print(file)
+        mommax = np.nanmax(datalist[0])
+        momstd, momSN, xcent, ycent, xpeak, ypeak = find_SN_sigma(file, mom_cutout)
+
+        if file == files[1]:
+            xcentkeep = xcent
+            ycentkeep = ycent
+
+        momstdlist.append(momstd)
+        momSNlist.append(momSN)
+
+        stds = np.arange(startstds, max_stds, step=step) * momstd
+        levelslist.append(stds)
+
+    colors=['red', 'yellow', 'green', 'blue']
+
+    # plot the contours first
+    ax = fig.add_subplot(111, projection=WCSlist[1])
+    ax.contour(datalist[1][0][0], colors=colors[0], levels=levelslist[0], linewidths=1, zorder=5)
+    for i in np.arange(2,5):
+        j = i - 1
+        transform = ax.get_transform(WCSlist[i])
+        ax.contour(datalist[i][0][0], colors=colors[j], levels=levelslist[j], linewidths=1, zorder=5+j,
+                   transform=transform)
+
+    # WCS transform to line the optical image up
+    opt_transform = ax.get_transform(WCSlist[0])
+
+    # plot the optical
+    im = ax.imshow(datalist[0], cmap=plt.cm.gray, transform=opt_transform, vmin=optext[0], vmax=optext[1], zorder=1)
+
+    # axis labels
+    ax.set_xlabel('RA')
+    ax.set_ylabel('DEC')
+
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+
+    # plot the WCS center of the BCG if given
+    if bcgcent:
+        bcgpixcent = bcgcent.to_pixel(WCSlist[1])
+        ax.scatter(*bcgpixcent, color='magenta', zorder=10, s=100, marker='+', label='BCG WCS Center')
+
+    # clip the axes to xlim, ylim
+    if whole_image == True:
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+
+    else:
+        xlims = ax.set_xlim([int(xcentkeep) - npix, int(xcentkeep) + npix])
+        ylims = ax.set_ylim([int(ycentkeep) - npix, int(ycentkeep) + npix])
+
+        if bcgcent:
+            xlims = ax.set_xlim([int(bcgpixcent[0]) - npix, int(bcgpixcent[0]) + npix])
+            ylims = ax.set_ylim([int(bcgpixcent[1]) - npix, int(bcgpixcent[1]) + npix])
+
+    ''' Show the beam --- assume it will be different in each spw'''
+    nextstart = 0
+    for i in np.arange(1, 5):
+        # get the semimajor and semiminor axis values from the header
+        a = (hdulist[i].header['BMAJ'] * u.deg)
+        b = (hdulist[i].header['BMIN'] * u.deg)
+        theta = (hdulist[i].header['BPA'] * u.deg).value + 90
+
+        # define skycoord objects for the extent of the axes to change into pix
+        center = SkyCoord(hdulist[i].header['CRVAL1'] * u.deg, hdulist[i].header['CRVAL2'] * u.deg, frame='fk5')
+        ext = SkyCoord(hdulist[i].header['CRVAL1'] * u.deg - a, hdulist[i].header['CRVAL2'] * u.deg + b, frame='fk5')
+
+        # change the wcs into native pixels
+        centerpix = WCSlist[i].world_to_pixel(center)
+        extpix = WCSlist[i].world_to_pixel(ext)
+
+        # center values are the center of the ellipse, the lengths are the differences between center and ext
+        arad, brad = int(extpix[0] - centerpix[0]), int(extpix[1] - centerpix[1])
+        if i == 1:
+            maxarad = arad
+            maxbrad = brad
+
+        # store a list of beam objects --- one per spw
+        if whole_image == True:
+            beambkg = Rectangle((xlim[0], ylim[0]), width=maxarad * 6, height=maxbrad * 1.5, facecolor='w',
+                                zorder=10, alpha=0.9)
+            beam = Ellipse((xlim[0] + arad * 0.75 + nextstart, ylim[0] + brad * 0.75), alpha=0.7,
+                           width=arad, height=brad, angle=theta, facecolor=colors[i-1], edgecolor='k', zorder=11)
+            ax.add_patch(beambkg)
+            ax.add_patch(beam)
+
+            nextstart += arad*1.5
+
+
+
+        else:
+            beambkg = Rectangle((xlims[0], ylims[0]), width=maxarad * 6, height=maxbrad * 1.5, facecolor='w',
+                                zorder=10, alpha=0.9)
+            beam = Ellipse((xlims[0] + arad * 0.75 + nextstart, ylims[0] + brad * 0.75), alpha=0.7,
+                           width=arad, height=brad, angle=theta, facecolor=colors[i-1], edgecolor='k', zorder=11)
+            ax.add_patch(beambkg)
+            ax.add_patch(beam)
+
+            nextstart += arad*1.5
+
+
+        '''get a legend on'''
+        ax.legend()
+        custom_lines = [Line2D([0], [0], color='red', lw=2), Line2D([0], [0], color='yellow', lw=2),
+                       Line2D([0], [0], color='green', lw=2), Line2D([0], [0], color='blue', lw=2)]
+        obsfreqs = np.array([224,226,240,242])
+        restfreqs = obsfreqs / (1+redshift)
+        freqlabels = str(restfreqs)+'GHz'
+        ax.legend(custom_lines, ['{:.3f}GHz'.format(restfreqs[0]), '{:.3f}GHz'.format(restfreqs[1]),
+                                 '{:.3f}GHz'.format(restfreqs[2]), '{:.3f}GHz'.format(restfreqs[3])]).set_zorder(20)
+
+
+
+
+
+
 def make_stamp_array(files, mom_cutout, npix, z, optext=(0, 80), mipsext=(0, 0.5), iracext=(0, 1), delp=None,
                      maxscale=None, max_stds=50, step=2, whole_image=False, startstds=2, p0=[0.3, 67200, 50, 0],
                      centmean=True, p02=None, linefree=(0, 50), n_gauss=None, zvals=(90, 160), SN=None,
@@ -313,7 +461,7 @@ def make_stamp_array(files, mom_cutout, npix, z, optext=(0, 80), mipsext=(0, 0.5
     # get moment 0 statistics to plot S/N contours
     mommax = np.nanmax(datalist[0])
     if not SN:
-        momstd, momSN, xcent, ycent, xpeak, ypeak = oop.find_SN_sigma(files[0], mom_cutout)
+        momstd, momSN, xcent, ycent, xpeak, ypeak = find_SN_sigma(files[0], mom_cutout)
     else:
         momstd = std
         momSN = SN
@@ -668,6 +816,389 @@ def make_stamp_array(files, mom_cutout, npix, z, optext=(0, 80), mipsext=(0, 0.5
     return datalist
 
 
+def cont_stamp_array(files, mom_cutout, npix, z, optext=(0, 80), mipsext=(0, 0.5), iracext=(0, 1), delp=None,
+                     maxscale=None, max_stds=50, step=2, whole_image=False, startstds=2, SN=None,
+                     max_scale=None, deltap=None, fit=True, crtf=None, ycutout=None,
+                     xpeakpass=None, ypeakpass=None, xcentpass=None, ycentpass=None, std=None, bcgcent=None,
+                     ozdes=None):
+    ''' make an array of postage stamp images for easy analysis of a single souce.
+        INPUTS:
+            - files: (momfile, optfile, mipsfile, iracfile) list of file pointers
+            - mom_cutout: (xmin, xmax) coordinates of a region around the source in the moment 0 file small
+                enough that the source can be fit to a 2D gaussian to do statistics with
+            - npix: number of moment 0 native pixels on each side of the center of the source to include in stamps
+            - z: redshift of the source (to put a reference line down in the spectral profile)
+            - optmin, optmax: vmin, vmax for the DES optical colorscale
+            - delp: positional uncertainty for ALMA moment 0 (if not none, will plot a cross centered around the
+                middle of the source to show by how much the position is uncertain)
+            - maxscale: maximum recoverable angular scale for ALMA observations (if not none, will plot a circle
+                showing how much of the structure falls into this scale)
+            - max_stds: maximum number of S/N sigma to reach with the contours
+            - step: spacing between moment 0 contours, in S/N sigma
+            - whole_image: plot the entire extent of the moment 0 image, instead of just a cutout
+            - startstds: S/N level above RMS at which contours should start
+            - ozdes: data from the ozdes fits file with all the redshifts
+    '''
+
+    # open all of the files and get their data and wcs
+    # files are organized like files[0]: momfile, files[1]: optfile, files[2]: mipsfile, files[3]: iracfile
+    # files[4]: specfile
+    WCSlist = []
+    datalist = []
+    hdulist = []
+    for file in files[0:4]:
+        hdu = fits.open(file)[0]
+        hdulist.append(hdu)
+        WCSlist.append(wcs.WCS(hdu.header).sub(['celestial']))
+        data = hdu.data
+        data[np.where(np.isnan(data))] = 0.
+        data[np.where(data == -np.inf)] = 0.
+        data[np.where(data == np.inf)] = 0.
+        if len(data) == 4:
+            data = data[0, 0, :, :]
+        datalist.append(data)
+
+    if ozdes is not None:
+        # split apart the ozdes data into only the useful stuff:
+        ozdesra = ozdes['RA']
+        ozdesdec = ozdes['DEC']
+        ozdesz = ozdes['z']
+
+        # make a skycoord array of all the ozdes coordinates
+        ozdescoords = SkyCoord(ra=ozdesra*u.deg, dec=ozdesdec*u.deg, frame='icrs')
+
+        haszidx = np.where(WCSlist[0].footprint_contains(ozdescoords))
+        haszcoords = ozdescoords[haszidx]
+        haszpixcoords = haszcoords.to_pixel(WCSlist[0])
+        haszredshift = ozdesz[haszidx]
+
+    # define the figure with 3 sets of axes
+    fig = plt.figure(figsize=(15, 5))
+
+    ''' first set of axes: this is the moment 0 overlaid on DES '''
+    # get moment 0 statistics to plot S/N contours
+    mommax = np.nanmax(datalist[0])
+    if not SN:
+        momstd, momSN, xcent, ycent, xpeak, ypeak = find_SN_sigma(files[0], mom_cutout)
+    else:
+        momstd = std
+        momSN = SN
+        xcent = xcentpass
+        ycent = ycentpass
+        xpeak = xpeakpass
+        ypeak = ypeakpass
+
+    levels = np.ones((max_stds - startstds) // step) * momstd
+    stds = np.arange(startstds, max_stds, step=step) * momstd
+    levels = stds
+
+    # plot the contours first
+    alax = fig.add_subplot(131, projection=WCSlist[0])
+    alax.contour(datalist[0][0][0], colors='red', levels=levels, zorder=5)
+
+    #     custom_lines = [Line2D([0],[0], color='red', lw=2)]
+    #     alax.legend(custom_lines, ['{} sigma steps'.format(step)])
+
+    xlim = alax.get_xlim()
+    ylim = alax.get_ylim()
+
+    # WCS transform to line the optical image up
+    opt_transform = alax.get_transform(WCSlist[1])
+
+    # plot the optical
+    im = alax.imshow(datalist[1], cmap=plt.cm.gray, transform=opt_transform, vmin=optext[0], vmax=optext[1], zorder=1)
+
+    ''' Show the beam'''
+    # get the semimajor and semiminor axis values from the header
+    a = (hdulist[0].header['BMAJ'] * u.deg)
+    b = (hdulist[0].header['BMIN'] * u.deg)
+    theta = (hdulist[0].header['BPA'] * u.deg).value + 90
+
+    # define skycoord objects for the extent of the axes to change into pix
+    center = SkyCoord(hdulist[0].header['CRVAL1'] * u.deg, hdulist[0].header['CRVAL2'] * u.deg, frame='fk5')
+    ext = SkyCoord(hdulist[0].header['CRVAL1'] * u.deg - a, hdulist[0].header['CRVAL2'] * u.deg + b, frame='fk5')
+
+    # change the wcs into native pixels
+    centerpix = WCSlist[0].world_to_pixel(center)
+    extpix = WCSlist[0].world_to_pixel(ext)
+
+    # center values are the center of the ellipse, the lengths are the differences between center and ext
+    arad, brad = int(extpix[0] - centerpix[0]), int(extpix[1] - centerpix[1])
+
+    alax.set_xlabel('RA')
+    alax.set_ylabel('DEC')
+
+    if whole_image == True:
+        alax.set_xlim(xlim)
+        alax.set_ylim(ylim)
+
+        beambkg = Rectangle((xlim[0], ylim[0]), width=arad * 1.5, height=brad * 1.5, facecolor='w',
+                            edgecolor='k', zorder=10, alpha=0.9)
+        beam = Ellipse((xlim[0] + arad * 0.75, ylim[0] + brad * 0.75), alpha=0.9,
+                       width=arad, height=brad, angle=theta, facecolor='yellow', edgecolor='k', zorder=11)
+
+    else:
+        xlims = alax.set_xlim([int(xcent) - npix, int(xcent) + npix])
+        ylims = alax.set_ylim([int(ycent) - npix, int(ycent) + npix])
+
+        if bcgcent:
+            bcgpixcent = bcgcent.to_pixel(WCSlist[0])
+            xlims = alax.set_xlim([int(bcgpixcent[0]) - npix, int(bcgpixcent[0]) + npix])
+            ylims = alax.set_ylim([int(bcgpixcent[1]) - npix, int(bcgpixcent[1]) + npix])
+
+        beambkg = Rectangle((xlims[0], ylims[0]), width=arad * 1.5, height=brad * 1.5, facecolor='w',
+                            edgecolor='k', zorder=10, alpha=0.9)
+        beam = Ellipse((xlims[0] + arad * 0.75, ylims[0] + brad * 0.75), alpha=0.9,
+                       width=arad, height=brad, angle=theta, facecolor='yellow', edgecolor='k', zorder=11)
+
+    #     alax.add_patch(beambkg)
+    alax.add_patch(beam)
+    alax.set_title('DES z-band')
+    alax.tick_params(
+        axis='y',
+        which='both',
+        left='on',
+        right='off',
+        direction='out',
+        labelleft=True,
+        length=5,
+        labelsize='small'
+    )
+    alax.tick_params(
+        axis='x',
+        labelsize='small'
+    )
+
+    if max_scale is not None:
+        arcsecperpix = np.abs((hdulist[0].header['CDELT1'] * u.deg).to(u.arcsec)).value
+        max_scale = max_scale / arcsecperpix
+        mcirc = Ellipse((xcent, ycent), width=max_scale, height=max_scale,
+                        facecolor='green', edgecolor='green', zorder=10, alpha=0.3)
+        print("maxscale")
+        print(mcirc)
+        alax.add_patch(mcirc)
+
+    if deltap is not None:
+        arcsecperpix = np.abs((hdulist[0].header['CDELT1'] * u.deg).to(u.arcsec)).value
+        deltap = deltap / arcsecperpix
+        horline = Line2D([xpeak - deltap, xpeak + deltap], [ypeak, ypeak], color='orange', zorder=10)
+        vertline = Line2D([xpeak, xpeak], [ypeak - deltap, ypeak + deltap], color='orange', zorder=10)
+        alax.add_line(horline)
+        alax.add_line(vertline)
+
+
+    if bcgcent:
+        bcgpixcent = bcgcent.to_pixel(WCSlist[0])
+        alax.scatter(*bcgpixcent, color='green', zorder=10, s=100, marker='+')
+        xlims = alax.set_xlim([int(bcgpixcent[0]) - npix, int(bcgpixcent[0]) + npix])
+        ylims = alax.set_ylim([int(bcgpixcent[1]) - npix, int(bcgpixcent[1]) + npix])
+
+    if ozdes is not None:
+        alax.scatter(*haszpixcoords, zorder=20, color='tab:orange', marker='x')
+        for i in range(len(haszpixcoords[0])):
+            alax.text(haszpixcoords[0][i]+8, haszpixcoords[1][i]+8, str(haszredshift[i]),
+                     bbox=dict(facecolor='tab:orange', edgecolor='tab:orange', alpha=0.7, boxstyle='round'))
+
+
+    if crtf:
+        ''' show the region over which the spectral profile was taken'''
+        with open(crtf, 'r') as file:
+            txt = file.read().split()
+
+            xcent = '0'
+            for s in txt[1]:
+                if (s.isdigit() or (s == '.')):
+                    xcent += s
+            xcent = float(xcent[1:])
+
+            ycent = '0'
+            for s in txt[2]:
+                if (s.isdigit() or (s == '.')):
+                    ycent += s
+            ycent = float(ycent[1:])
+
+            lena = '0'
+            for s in txt[3]:
+                if (s.isdigit() or (s == '.')):
+                    lena += s
+            lena = float(lena[1:]) * 2
+
+            lenb = '0'
+            for s in txt[4]:
+                if (s.isdigit() or (s == '.')):
+                    lenb += s
+            lenb = float(lenb[1:]) * 2
+
+            regtheta = '0'
+            for s in txt[5]:
+                if (s.isdigit() or (s == '.')):
+                    regtheta += s
+            regtheta = float(regtheta[1:]) + 90
+        # end with open(crtf) as file
+
+        beamreg = Ellipse((xcent, ycent), width=lena, height=lenb, angle=regtheta, alpha=0.3,
+                          facecolor='orange', zorder=4, edgecolor='orange')
+        print("beamreg")
+        print(beamreg)
+        alax.add_patch(beamreg)
+    # end if crtf
+
+
+
+    ''' second set of axes: MIPS imaging '''
+    miax = fig.add_subplot(132, projection=WCSlist[0])
+
+    # tranformation to line the MIPS axes up
+    mips_transform = miax.get_transform(WCSlist[2])
+
+    miax.imshow(datalist[2], cmap=plt.cm.gray, vmin=mipsext[0], vmax=mipsext[1], zorder=1, transform=mips_transform)
+    miax.contour(datalist[0][0][0], colors='red', levels=levels, zorder=5)
+
+    if whole_image == True:
+        miax.set_xlim(xlim)
+        miax.set_ylim(ylim)
+
+        beambkg = Rectangle((xlim[0], ylim[0]), width=arad * 1.5, height=brad * 1.5, facecolor='w',
+                            edgecolor='k', zorder=10, alpha=0.9)
+        beam = Ellipse((xlim[0] + arad * 0.75, ylim[0] + brad * 0.75), alpha=0.9,
+                       width=arad, height=brad, angle=theta, facecolor='yellow', edgecolor='k', zorder=11)
+
+    else:
+        xlims = miax.set_xlim([int(xcent) - npix, int(xcent) + npix])
+        ylims = miax.set_ylim([int(ycent) - npix, int(ycent) + npix])
+
+        if bcgcent:
+            bcgpixcent = bcgcent.to_pixel(WCSlist[0])
+            xlims = miax.set_xlim([int(bcgpixcent[0]) - npix, int(bcgpixcent[0]) + npix])
+            ylims = miax.set_ylim([int(bcgpixcent[1]) - npix, int(bcgpixcent[1]) + npix])
+
+        beambkg = Rectangle((xlims[0], ylims[0]), width=arad * 1.5, height=brad * 1.5, facecolor='w',
+                            edgecolor='k', zorder=10, alpha=0.9)
+        beam = Ellipse((xlims[0] + arad * 0.75, ylims[0] + brad * 0.75), alpha=0.9,
+                       width=arad, height=brad, angle=theta, facecolor='yellow', edgecolor='k', zorder=11)
+
+    #     alax.add_patch(beambkg)
+    miax.add_patch(beam)
+    miax.set_xlabel('RA')
+    miax.tick_params(
+        axis='y',
+        which='both',
+        left='on',
+        right='off',
+        direction='out',
+        labelleft=False,
+        labelright=False,
+        length=5
+    )
+    miax.tick_params(
+        axis='x',
+        labelsize='small'
+    )
+    miax.set_title(r'MIPS $24\ \mu\mathrm{m}$')
+
+    if max_scale is not None:
+        mcirc = Ellipse([xcent, ycent], width=max_scale, height=max_scale,
+                        facecolor='green', edgecolor='k', zorder=3, alpha=0.3)
+        miax.add_patch(mcirc)
+
+    if deltap is not None:
+        #         miax.scatter(xpeak, ypeak, color='orange', zorder=20)
+        horline = Line2D([xpeak - deltap, xpeak + deltap], [ypeak, ypeak], color='orange', zorder=10)
+        vertline = Line2D([xpeak, xpeak], [ypeak - deltap, ypeak + deltap], color='orange', zorder=10)
+        miax.add_line(horline)
+        miax.add_line(vertline)
+
+    if bcgcent:
+        bcgpixcent = bcgcent.to_pixel(WCSlist[0])
+        miax.scatter(*bcgpixcent, color='green', zorder=10, s=100, marker='+')
+        xlims = miax.set_xlim([int(bcgpixcent[0]) - npix, int(bcgpixcent[0]) + npix])
+        ylims = miax.set_ylim([int(bcgpixcent[1]) - npix, int(bcgpixcent[1]) + npix])
+
+    if ozdes is not None:
+        miax.scatter(*haszpixcoords, zorder=20, color='tab:orange', marker='x')
+        for i in range(len(haszpixcoords[0])):
+            miax.text(haszpixcoords[0][i]+8, haszpixcoords[1][i]+8, str(haszredshift[i]),
+                     bbox=dict(facecolor='tab:orange', edgecolor='tab:orange', alpha=0.7, boxstyle='round'))
+
+    ''' third set of axes: IRAC imaging '''
+    irax = fig.add_subplot(133, projection=WCSlist[0])
+
+    # tranformation to line the IRAC axes up
+    irac_transform = irax.get_transform(WCSlist[3])
+
+    irax.imshow(datalist[3], cmap=plt.cm.gray, vmin=iracext[0], vmax=iracext[1], zorder=1, transform=irac_transform)
+    irax.contour(datalist[0][0][0], colors='red', levels=levels, zorder=5)
+
+    if whole_image == True:
+        irax.set_xlim(xlim)
+        irax.set_ylim(ylim)
+
+        beambkg = Rectangle((xlim[0], ylim[0]), width=arad * 1.5, height=brad * 1.5, facecolor='w',
+                            edgecolor='k', zorder=10, alpha=0.9)
+        beam = Ellipse((xlim[0] + arad * 0.75, ylim[0] + brad * 0.75), alpha=0.9,
+                       width=arad, height=brad, angle=theta, facecolor='yellow', edgecolor='k', zorder=11)
+
+    else:
+        xlims = irax.set_xlim([int(xcent) - npix, int(xcent) + npix])
+        ylims = irax.set_ylim([int(ycent) - npix, int(ycent) + npix])
+
+        if bcgcent:
+            bcgpixcent = bcgcent.to_pixel(WCSlist[0])
+            xlims = irax.set_xlim([int(bcgpixcent[0]) - npix, int(bcgpixcent[0]) + npix])
+            ylims = irax.set_ylim([int(bcgpixcent[1]) - npix, int(bcgpixcent[1]) + npix])
+
+        beambkg = Rectangle((xlims[0], ylims[0]), width=arad * 1.5, height=brad * 1.5, facecolor='w',
+                            edgecolor='k', zorder=10, alpha=0.9)
+        beam = Ellipse((xlims[0] + arad * 0.75, ylims[0] + brad * 0.75), alpha=0.9,
+                       width=arad, height=brad, angle=theta, facecolor='yellow', edgecolor='k', zorder=11)
+
+    #     alax.add_patch(beambkg)
+    irax.add_patch(beam)
+    irax.set_xlabel('RA')
+    irax.tick_params(
+        axis='y',
+        which='both',
+        left='on',
+        right='off',
+        direction='out',
+        labelleft=False,
+        labelright=False,
+        length=5
+    )
+    irax.tick_params(
+        axis='x',
+        labelsize='small'
+    )
+    irax.set_title(r'IRAC $3.6\ \mu\mathrm{m}$')
+
+    if max_scale is not None:
+        mcirc = Ellipse([xcent, ycent], width=max_scale, height=max_scale,
+                        facecolor='green', edgecolor='k', zorder=3, alpha=0.3)
+        irax.add_patch(mcirc)
+
+    if deltap is not None:
+        #         irax.scatter(xpeak, ypeak, color='orange', zorder=20)
+        horline = Line2D([xpeak - deltap, xpeak + deltap], [ypeak, ypeak], color='orange', zorder=10)
+        vertline = Line2D([xpeak, xpeak], [ypeak - deltap, ypeak + deltap], color='orange', zorder=10)
+        irax.add_line(horline)
+        irax.add_line(vertline)
+
+    if bcgcent:
+        bcgpixcent = bcgcent.to_pixel(WCSlist[0])
+        irax.scatter(*bcgpixcent, color='green', zorder=10, s=100, marker='+')
+        xlims = irax.set_xlim([int(bcgpixcent[0]) - npix, int(bcgpixcent[0]) + npix])
+        ylims = irax.set_ylim([int(bcgpixcent[1]) - npix, int(bcgpixcent[1]) + npix])
+
+    if ozdes is not None:
+        irax.scatter(*haszpixcoords, zorder=20, color='tab:orange', marker='x')
+        for i in range(len(haszpixcoords[0])):
+            irax.text(haszpixcoords[0][i]+8, haszpixcoords[1][i]+8, str(haszredshift[i]),
+                     bbox=dict(facecolor='tab:orange', edgecolor='tab:orange', alpha=0.7, boxstyle='round'))
+
+    return datalist
+
+
+
 def plot_velocity_overlay(files, optmin, optmax, xlims, ylims, alpha=0.05, vmin=None, vmax=None, step=None):
     ''' function to plot the filled contours of a radio velocity field over an optical image.
         files should be structured ('optical file path', 'moment 1 file path') to fits files. Optmin and optmax are
@@ -739,7 +1270,7 @@ def plot_velocity_overlay(files, optmin, optmax, xlims, ylims, alpha=0.05, vmin=
     if plotmom0:
         # get moment 0 statistics to plot S/N contours
         mom0max = np.nanmax(mom0data)
-        momstd, momSN, xcent, ycent, xpeak, ypeak = oop.find_SN_sigma(files[2], xlims)
+        momstd, momSN, xcent, ycent, xpeak, ypeak = find_SN_sigma(files[2], xlims)
         levels = np.ones((50 - 2) // step) * momstd
         stds = np.arange(50, 2, step=2) * momstd
         levels = stds
@@ -852,7 +1383,7 @@ centerpix = momwcs.world_to_pixel(center)
 extpix = momwcs.world_to_pixel(ext)
 
 # center values are the center of the ellipse, the lengths are the differences between center and ext
-arad, brad = int(extpix[0] - centerpix[0]), int(extpix[1] - centerpix[1])  
+arad, brad = int(extpix[0] - centerpix[0]), int(extpix[1] - centerpix[1])
 
 
 
@@ -860,9 +1391,9 @@ ax.set_xlabel('RA')
 ax.set_ylabel('DEC')
 
 
-beambkg = Rectangle((83, 83), width=arad*1.5, height=brad*1.5, facecolor='w', 
+beambkg = Rectangle((83, 83), width=arad*1.5, height=brad*1.5, facecolor='w',
                     edgecolor='k',zorder=10, alpha=0.9)
-beam = Ellipse((83 + arad*0.75, 83 + brad*0.75), 
+beam = Ellipse((83 + arad*0.75, 83 + brad*0.75),
                width=arad, height=brad, angle=theta, facecolor='w', edgecolor='k', zorder=11)
 
 ax.add_patch(beambkg)
@@ -872,5 +1403,3 @@ ax.add_patch(beam)
 ax.set_xlim([83, 133])
 ax.set_ylim([83, 133])
 '''
-
-

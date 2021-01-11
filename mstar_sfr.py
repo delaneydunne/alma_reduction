@@ -155,16 +155,18 @@ def get_properties(frame, templatefile, cosmo, corr, tol=0.005):
     sfevals = sfrvals / frame.mgas * 1e9
     dsfevals = sfevals * np.sqrt((dsfrvals/sfrvals)**2 + (frame.dmgas/frame.mgas)**2)
 
-    # add everything into the dataframe as new columns
-    frame['sfr'] = sfrvals
-    frame['dsfr'] = dsfrvals
-    frame['mstar'] = mstarvals
-    frame['dmstar'] = dmstarvals
-    frame['ssfr'] = ssfrvals
-    frame['dssfr'] = dssfrvals
-    frame['fgas'] = fgasvals
-    frame['dfgas'] = dfgasvals
-    frame['sfe'] = sfevals
-    frame['dsfe'] = dsfevals
+    newframe = frame.copy()
 
-    return frame
+    # add everything into the dataframe as new columns
+    newframe['sfr'] = sfrvals
+    newframe['dsfr'] = dsfrvals
+    newframe['mstar'] = mstarvals
+    newframe['dmstar'] = dmstarvals
+    newframe['ssfr'] = ssfrvals
+    newframe['dssfr'] = dssfrvals
+    newframe['fgas'] = fgasvals
+    newframe['dfgas'] = dfgasvals
+    newframe['sfe'] = sfevals
+    newframe['dsfe'] = dsfevals
+
+    return newframe
